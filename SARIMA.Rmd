@@ -1,0 +1,462 @@
+---
+title: "SARIMA"
+author: "Songül Karakaya"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: yes
+    latex_engine: xelatex
+---
+
+\newpage
+# Zaman Serisinin Tanıtılması ve Durağanlık Kontrolleri
+
+Bu rapor, 1989 yılından itibaren aylık doğalgaz ithalat fiyat verilerinden oluşturulmuş bir zaman serisini gösterir.
+
+Bu raporda amacımız, verinin yapısını anlamak, durağanlığını test etmek, uygun bir SARIMA modeli kurmak ve bu model ile gelecek dönemler için fiyat tahmini yapmaktır. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+Sys.setlocale("LC_ALL", "en_US.UTF-8")
+library(readxl)
+library(tseries)      # adf.test, kpss.test, pp.test için
+library(forecast)     # diff ve auto.arima için
+library(ggplot2)
+
+# Veri Yükleme ve Zaman Serisine Dönüştürme
+gasprice <- read_xlsx("your adress")
+gasprice$date <- as.Date(gasprice$date)
+ts_data <- ts(gasprice$price, start = c(1989,1), frequency = 12)
+
+```
+
+
+```{r eval=FALSE, include=FALSE}
+# Verinin ilk birkaç satırını görelim
+head(gasprice)
+```
+
+##  Serinin Görselleştirilmesi ve Dekompozisyon
+
+Zaman serisinin grafiğini görelim.
+
+```{r ilk-gorsellestirme, fig.cap="Doğalgaz Fiyatları Zaman Serisi Grafiği (1989-Günümüz)", fig.height=4, fig.width=8}
+# Zaman serisi grafiği
+ts.plot(ts_data, 
+        main = "Doğalgaz Fiyatları Zaman Serisi", 
+        ylab = "Fiyat", 
+        xlab = "Zaman")
+```
+
+
+Seride yukarı yönlü trend ve tekrarlayan mevsimsel dalgalanmalar olduğu görülebilir. Bu yapıları daha net görmek için seriyi bileşenlerine ayıralım. Toplamsal (`additive`) model, mevsimselliğin boyutunun zamanla değişmediği varsayımına dayanır. 
+
+```{r dekompozisyon, fig.cap="Zaman Serisinin Toplamsal Bileşenlere Ayrıştırılması", fig.height=4, fig.width=8}
+# Zaman serisi dekompozisyonu 
+dekompozisyon <- decompose(ts_data, type = "additive") # (toplamsal model)
+plot(dekompozisyon)
+```
+
+Bileşenler incelendiğinde serinin **durağan olmadığını** görülmektedir. 
+\newpage
+
+##  Orijinal Serinin Durağanlık Analizi
+
+Görsel analizde edindiğimiz serinin durağan olmadığı izlenimini istatistiksel testler ile teyit edelim. Bunun için  Dickey-Fuller (ADF), Phillips-Perron (PP) ve KPSS testlerini kullanacağız.
+
+```{r duraganlik-testleri-orijinal, echo=FALSE}
+# Orijinal serinin durağanlık testleri
+cat("\n--- Orijinal Serinin Durağanlık Testleri ---\n")
+#cat("ADF Test Sonucu:\n")   # H0: Seri durağan değil. p > 0.05 ise H0 reddedilemez.
+print(adf.test(ts_data))
+#cat("\nPP Test Sonucu:\n")    # H0: Seri durağan değil. p > 0.05 ise H0 reddedilemez.
+print(pp.test(ts_data))
+#cat("\nKPSS Test Sonucu:\n")  # H0: Seri durağan. p < 0.05 ise H0 reddedilir.
+print(kpss.test(ts_data, null = "Level"))
+```
+\newpage
+
+**Test Sonuçlarının Yorumlanması:**
+
+* **ADF Testi:** 
+
+p değeri 0.05'ten büyüktür. Bu nedenle, H0 hipotezini (durağanlık) reddedemeyiz.
+
+
+* **PP Testi:**
+
+p değeri 0.05'ten küçüktür. H0 reddedilir, serinin durağan olduğunu söyler.
+
+
+* **KPSS Testi:**
+
+p-değeri 0.05'ten küçük olduğu için, serinin durağan olduğunu reddederiz.
+
+
+
+ADF testi ve KPSS testi serinin durağan olmadığını söylerken PP testi serinin durağan olduğunu söylüyor. Daha net bir sonuca varmak için serinin ACF ve PACF grafiklerine bakalım.
+
+
+```{r acf-pacf-orijinal, fig.cap="Orijinal Serinin ACF ve PACF Grafikleri", fig.height=3.5, fig.width=8}
+par(mfrow=c(1,2))  # Grafikleri 1 satır 2 sütun şeklinde yan yana göstermek için
+acf(ts_data, lag.max = 50, main = "Orijinal Seri ACF")
+pacf(ts_data, lag.max = 50, main = "Orijinal Seri PACF")
+par(mfrow=c(1,1)) # Grafik düzenini sıfırlama
+
+```
+
+
+**Grafiklerin Yorumlanması:**
+
+ACF grafiğindeki otokorelasyon değerlerinin çok yavaş bir şekilde azalıyor muhtemelen bu durum seride çok güçlü bir mevsimsellik olmasından kaynaklanıyor.
+
+Korelasyon grafikleri, modelleme öncesinde serinin durağanlaştırılması gerektiğini kesin olarak ortaya koyuyor. Durağanlaştırmak için fark alacağız.
+
+\newpage
+
+# Orijinal Seride Fark Alma
+
+## Birinci Derece Normal Fark (d=1)
+
+```{r fark_d1, echo=FALSE, fig.height=3.5, fig.width=7}
+diff1_ts_data <- diff(ts_data, differences = 1)
+ts.plot(diff1_ts_data, main = "d=1 Fark Alınmış Seri", ylab = "Farklı Fiyat")
+
+cat("\n--- Birinci Derece Fark Alınmış Serinin Durağanlık Testleri (d=1) ---\n")
+print(adf.test(diff1_ts_data))
+print(pp.test(diff1_ts_data))
+print(kpss.test(diff1_ts_data, null = "Level"))
+
+```
+\newpage
+```{r fark_d1_acf_pacf, echo=FALSE, fig.height=3.5, fig.width=7}
+cat("\n--- Birinci Derece Fark Alınmış Serinin ACF ve PACF Testleri ---\n")
+par(mfrow=c(1,2))
+acf(diff1_ts_data, lag.max = 50, main = "d=1 ACF")
+pacf(diff1_ts_data, lag.max = 50, main = "d=1 PACF")
+par(mfrow=c(1,1))
+```
+
+**Yorum:** Trendin büyük ölçüde ortadan kalktığını söyleyebiliriz ve test sonuçları serinin durağanlaştığını gösteriyor (ADF/PP p-değerleri < 0.05, KPSS p-değeri > 0.05). Ancak, grafiklerde 12, 24, 36 gibi mevsimsel gecikmelerde belirgin pozitif korelasyonlar görülmektedir. Bu, seride hala güçlü bir mevsimsel etkinin olduğunu gösterir.
+
+
+## Birinci Derece ve Mevsimsel Fark (d=1, D=1)
+
+```{r fark_d1_D1, echo=FALSE, fig.height=4.2, fig.width=7}
+diff1_seasonal1_ts_data <- diff(diff1_ts_data, lag = 12, differences = 1)
+
+ts.plot(diff1_seasonal1_ts_data, main = "d=1, D=1 Fark Alınmış Seri", ylab = "Farklı Fiyat")
+cat(" Birinci Derece ve Mevsimsel Fark Alınmış Serinin Durağanlık Testleri (d=1, D=1) \n")
+print(adf.test(diff1_seasonal1_ts_data))
+print(pp.test(diff1_seasonal1_ts_data))
+print(kpss.test(diff1_seasonal1_ts_data, null = "Level"))
+
+```
+```{r echo=FALSE, fig.height=3.7, fig.width=7}
+par(mfrow=c(1,2))
+acf(diff1_seasonal1_ts_data, lag.max = 50, main = "ACF (d=1, D=1)")
+pacf(diff1_seasonal1_ts_data, lag.max = 50, main = "PACF (d=1, D=1)")
+par(mfrow=c(1,1))
+```
+
+**Yorum:** Bu seri durağan görünmektedir. Ancak, orijinal serideki dalgalanmaların (varyansın) zamanla arttığını gözlemlemiştik. Fark alma işlemi varyansı stabilize etmez. Bu nedenle, daha iyi bir model için varyansı stabilize eden logaritmik dönüşümü de deneyelim.
+
+\newpage
+# Serinin Logaritmik Dönüşümü ve Fark Alma
+
+## Logaritmik Dönüşüm
+
+```{r log_donusumu, fig.height=3.5, fig.width=7}
+log_ts_data <- log(ts_data)
+
+ts.plot(log_ts_data, main = "Log Dönüşümü Uygulanmış Seri", ylab = "Log(Fiyat)")
+
+```
+
+```{r echo=FALSE, fig.height=3.7, fig.width=7}
+par(mfrow=c(1,2))
+acf(log_ts_data, lag.max = 50, main = "Log Dönüşümlü Seri ACF")
+pacf(log_ts_data, lag.max = 50, main = "Log Dönüşümlü Seri PACF")
+par(mfrow=c(1,1))
+
+```
+
+**Yorum:** Logaritmik dönüşüm, serinin dalgalanmalarını daha orantılı hale getirdi. Ancak, ACF grafiğinin hala çok yavaş sönümlenmesi, serinin hala güçlü bir trende sahip olduğunu ve durağan olmadığını gösterir.
+
+\newpage
+## Log Dönüşümü + Birinci Fark (d=1)
+
+```{r log_fark_d1, echo=FALSE, fig.height=3.7, fig.width=7}
+diff1_log_ts_data <- diff(log_ts_data, differences = 1)
+
+ts.plot(diff1_log_ts_data, main = "Log Dönüşümü ve d=1 Fark Alınmış Seri")
+
+cat("--- Log Dönüşümü ve d=1 Fark Alınmış Serinin Durağanlık Testleri ---\n")
+print(adf.test(diff1_log_ts_data))
+print(kpss.test(diff1_log_ts_data, null = "Level"))
+
+```
+```{r, echo=FALSE, fig.height=3.5, fig.width=7}
+par(mfrow=c(1,2))
+acf(diff1_log_ts_data, lag.max = 50, main = "Log ACF (d=1)")
+pacf(diff1_log_ts_data, lag.max = 50, main = "Log PACF (d=1)")
+par(mfrow=c(1,1))
+```
+
+**Yorum:** Tıpkı log dönüşümsüz seride olduğu gibi, birinci fark trendi ortadan kaldırmış ancak ACF grafiğindeki mevsimsel etkiler hala belirgin.
+
+
+## Log Dönüşümü + Birinci ve Mevsimsel Fark (d=1, D=1)
+
+```{r log_fark_d1_D1, echo=FALSE, fig.height=4, fig.width=7}
+diff1_seasonal1_log_ts_data <- diff(diff1_log_ts_data, lag = 12, differences = 1)
+ts.plot(diff1_seasonal1_log_ts_data, main = "Log Dönüşümü, d=1 ve D=1 Fark Alınmış Seri")
+
+```
+\newpage
+```{r, echo=FALSE, fig.height=3.5, fig.width=7}
+cat("--- Log Dönüşümü, d=1 ve D=1 Fark Alınmış Serinin Durağanlık Testleri ---\n")
+print(adf.test(diff1_seasonal1_log_ts_data))
+print(kpss.test(diff1_seasonal1_log_ts_data, null = "Level"))
+
+par(mfrow=c(1,2))
+acf(diff1_seasonal1_log_ts_data, lag.max = 50, main = "Log d=1, D=1 Serinin ACF")
+pacf(diff1_seasonal1_log_ts_data, lag.max = 50, main = "Log d=1, D=1 Serinin PACF")
+par(mfrow=c(1,1))
+```
+
+
+**Yorum:**  Seri durağan görünüyor (ADF p < 0.05, KPSS p > 0.05). ACF ve PACF grafikleri hızla sönümlenmektedir. Mevsimsel ve mevsimsel olmayan gecikmelerde birkaç anlamlı çubuk (spike) görülmektedir ki bu, modelin p,q,P,Q parametreleri için bize ipucu verir. **Bu kombinasyon, modelleme için en güçlü adayımızdır.**
+
+
+## İkinci Dereceden Fark Alma İşlemleri
+
+**Yorum:** Görüleceği üzere iki kez mevsimsel olmayan fark (`d=2`) gibi daha fazla fark alma işlemi, seriyi durağan yapsa da, genellikle PACF grafiğinde büyük bir negatif spike'a yol açarak aşırı fark alındığını gösterir. Bu nedenle bu kombinasyonları tercih etmeme taraftarıyım.
+
+\newpage
+
+```{r asiri_fark_alma, echo=FALSE, fig.height=3.5, fig.width=7, message=FALSE, warning=FALSE}
+# --- Log Dönüşümü, d=2 Fark ---
+diff2_log_ts_data <- diff(log_ts_data, differences = 2)
+ts.plot(diff2_log_ts_data, main = "Log Dönüşümü ve d=2 Fark Alınmış Seri")
+cat("--- Log Dönüşümü ve d=2 Fark Alınmış Seri Testleri ---\n")
+print(adf.test(diff2_log_ts_data))
+print(kpss.test(diff2_log_ts_data))
+
+par(mfrow=c(1,2))
+acf(diff2_log_ts_data, lag.max = 50, main = "Log d=2 Serinin ACF")
+pacf(diff2_log_ts_data, lag.max = 50, main = "Log d=2 Serinin PACF")
+par(mfrow=c(1,1))
+
+```
+\newpage
+```{r, echo=FALSE, fig.height=3.5, fig.width=7, message=FALSE, warning=FALSE}
+
+# --- Log Dönüşümü, d=2 ve D=1 Fark ---
+diff2_seasonal1_log_ts_data <- diff(diff2_log_ts_data, lag = 12, differences = 1)
+ts.plot(diff2_seasonal1_log_ts_data, main = "Log Dönüşümü, d=2 ve D=1 Fark Alınmış Seri")
+cat("--- Log Dönüşümü, d=2 ve D=1 Fark Alınmış Seri Testleri ---\n")
+print(adf.test(diff2_seasonal1_log_ts_data))
+print(kpss.test(diff2_seasonal1_log_ts_data))
+
+par(mfrow=c(1,2))
+acf(diff2_seasonal1_log_ts_data, lag.max = 50, main = "Log d=2, D=1 Serinin ACF")
+pacf(diff2_seasonal1_log_ts_data, lag.max = 50, main = "Log d=2, D=1 Serinin PACF")
+par(mfrow=c(1,1))
+
+```
+\newpage
+
+# Model Belirleme
+
+## Otomatik Model Belirleme (`auto.arima`)
+
+Durağanlaştırdığımız seri için en uygun SARIMA(`p,d,q`)(`P,D,Q`)[12] modelini bulmak amacıyla `auto.arima()` fonksiyonunu çalıştıralım. Fonksiyona, logaritmik dönüşüm uygulanmış seriyi (`log_ts_data`) ve analizimiz sonucu bulduğumuz fark derecelerini (`d=1`, `D=1`) verelim.
+
+```{r auto-arima-arama, cache=TRUE}
+# --- auto.arima() ile Otomatik Model Seçimi ---
+auto_model <- auto.arima(log_ts_data,
+                         d = 1, D = 1,           
+                         stepwise = FALSE,      # Daha kapsamlı arama için
+                         approximation = FALSE, # Daha hassas arama için
+                         trace = TRUE)          # Hangi modellerin denendiğini göstermek için
+```
+
+`auto.arima` seçtiği en iyi modelin özet bilgilerini inceleyelim.
+
+```{r auto-arima-sonuc, echo=FALSE}
+cat("--- SARIMA(0,1,2)(0,1,2)[12] ---\n")
+print(summary(auto_model))
+```
+
+**Yorum:** `auto.arima` fonksiyonu, en düşük AICc değerine sahip olan modeli **SARIMA(0,1,1)(0,1,1)[12]** olarak belirledi. `auto.arima` 'nın her zaman en uygun modeli oluşturamayacağını göz önünde bulundurup kendi modellerimizi deneyelim.
+
+
+## Manuel Model Denemeleri ve Karşılaştırma
+
+p,q ve P,Q değerlerine log_ts_data'nın d=1 ve D=1 fark alınmış serisinin acf ve pacf grafiklerinin referansıyla Ar ve Ma tahminlerinde bulunarak model deneyelim.
+
+```{r manuel-modeller, echo=FALSE, message=FALSE, warning=FALSE}
+# Model A: ARIMA(0,1,2)(0,1,2)[12]
+model_A <- Arima(log_ts_data, order = c(0, 1, 2), seasonal = list(order = c(0, 1, 2), period = 12))
+cat("--- Model A: ARIMA(0,1,2)(0,1,2)[12] ---\n")
+print(summary(model_A))
+cat("-------------------------------------------\n")
+
+
+# Model B: ARIMA(2,1,0)(1,1,0)[12]
+model_B <- Arima(log_ts_data, order = c(2, 1, 0), seasonal = list(order = c(1, 1, 0), period = 12))
+cat("--- Model B: ARIMA(2,1,0)(1,1,0)[12] ---\n")
+print(summary(model_B))
+cat("-------------------------------------------\n")
+
+
+# Model C: SARIMA(1,1,1)(1,1,1)[12]
+model_C <- Arima(log_ts_data, order = c(1, 1, 1), seasonal = list(order = c(1, 1, 1), period = 12))
+cat("\n--- Model C: SARIMA(1,1,1)(1,1,1)[12] ---\n")
+print(summary(model_C))
+cat("-------------------------------------------\n")
+
+
+# Model D: SARIMA(4,1,0)(1,1,0)[12]
+model_D <- Arima(log_ts_data, order = c(4, 1, 0), seasonal = list(order = c(1, 1, 0), period = 12))
+cat("\n--- Model D: SARIMA(4,1,0)(1,1,0)[12] ---\n")
+print(summary(model_D))
+cat("-------------------------------------------\n")
+
+
+# Model E: SARIMA(4,1,4)(1,1,0)[12]
+model_E <- Arima(log_ts_data, order = c(4, 1, 4), seasonal = list(order = c(1, 1, 0), period = 12))
+cat("\n--- Model E: SARIMA(4,1,4)(1,1,0)[12] ---\n")
+print(summary(model_E))
+cat("-------------------------------------------\n")
+```
+
+# En Uygun Modele Karar Verme
+
+Şimdi, `auto.arima` modelini ve manuel olarak oluşturduğumuz tüm modelleri AIC ve BIC değerlerine göre karşılaştıralım. En düşük değerlere sahip model, genellikle en iyi model olarak kabul edilir.
+
+```{r modelleri-karsilastir, echo=FALSE}
+# Karşılaştırma için bir veri çerçevesi (data frame) oluşturalım
+# auto.arima'nın modelini de bu karşılaştırmaya dahil ediyoruz.
+comparison_df <- data.frame(
+    Model = c(
+        "auto.arima: ARIMA(0,1,1)(0,1,1)[12]", # auto_model'in sonucunu elle ekledik
+        "Model A: ARIMA(0,1,2)(0,1,2)[12]",
+        "Model B: ARIMA(2,1,0)(1,1,0)[12]",
+        "Model C: ARIMA(1,1,1)(1,1,1)[12]",
+        "Model D: ARIMA(4,1,0)(1,1,0)[12]",
+        "Model E: ARIMA(4,1,4)(1,1,0)[12]"
+    ),
+    AIC = c(
+        AIC(auto_model),
+        AIC(model_A),
+        AIC(model_B),
+        AIC(model_C),
+        AIC(model_D),
+        AIC(model_E)
+    ),
+    BIC = c(
+        BIC(auto_model),
+        BIC(model_A),
+        BIC(model_B),
+        BIC(model_C),
+        BIC(model_D),
+        BIC(model_E)
+    ),
+    AICc = c(
+        auto_model$aicc,
+        model_A$aicc,
+        model_B$aicc,
+        model_C$aicc,
+        model_D$aicc,
+        model_E$aicc
+    )
+)
+
+# AICc değerine göre küçükten büyüğe sıralayalım
+comparison_df <- comparison_df[order(comparison_df$AICc), ]
+
+# Sonuç tablosunu yazdıralım
+print(comparison_df)
+```
+**Yorum ve Sonuç:** Karşılaştırma tablosu, denenen tüm modeller arasında en düşük AIC, BIC ve özellikle AICc değerine sahip olan modelin `auto.arima` tarafından bulunan **SARIMA(0,1,1)(0,1,1)[12]** olduğunu gösteriyor.
+
+Bu nedenle, **uygun model** olarak bu modeli seçeceğiz.
+\newpage
+
+# Residual'ların Analizi (Diagnostic)
+
+
+```{r artik-analizi, echo=FALSE, fig.cap="SARIMA(0,1,1)(0,1,1)[12] Modelinin Artık Analizi Grafikleri", fig.height=5}
+# --- En İyi Modelin Artık Analizi (Residual Diagnostics) ---
+checkresiduals(auto_model)
+```
+
+##  Sonuçların Yorumlanması
+
+Yukarıda üretilen grafikler ve test sonucu şöyle yorumlanır:
+
+* **Zaman Serisi Grafiği:** Artıkların zaman içindeki grafiği, belirgin bir desen veya trend göstermiyor ve sıfır etrafında rastgele dağılıyor gibi (white-noise) görünüyor. Bu, modelin sistematik bir hata yapmadığını gösterir.
+
+* **Artıkların ACF Grafiği:** Artıkların otokorelasyon grafiğinde, normal lagler  güven aralığının dışına taşmıyor. Bu, artıklar arasında anlamlı bir korelasyon kalmadığını, yani modelin verideki korelasyon yapısını başarıyla yakaladığını gösterir.
+
+* **Artıkların Histogramı:** Artıkların dağılımı, normal dağılımı temsil eden çan eğrisine benziyor. Tam olarak olmasa da artıkların normal dağıldığını söyleyebiliriz.
+
+* **Ljung-Box Test Sonucu:** **p-değeri 0.05'ten oldukça büyüktür.** Bu, artıkların bağımsız olduğuna dair H0 hipotezini reddedemeyeceğimiz anlamına gelir. Yani residuallar white noise, istediğimiz sonuç
+
+**Sonuç:** Tüm bu kontroller, seçtiğimiz **SARIMA(0,1,1)(0,1,1)[12]** modelinin veriye iyi uyum sağladığını ve istatistiksel olarak geçerli olduğu sonucuna götürür bizi.
+
+
+# Model ile Gelecek Tahmini (Forecast)
+
+`SARIMA(0,1,1)(0,1,1)[12]` modelimizi kullanarak önümüzdeki 24 ay için fiyat tahmini yapacağız.
+
+```{r tahmin-yapma-ve-gorsellestirme, fig.cap="Doğalgaz Fiyatları için 24 Aylık Tahmin ve Güven Aralıkları", fig.height=5, fig.width=8}
+future_forecast <- forecast(auto_model, h = 24)
+
+autoplot(future_forecast) +
+    ggtitle("Doğalgaz Fiyatları için 24 Aylık Tahmin (SARIMA(0,1,1)(0,1,1)[12])") +
+    xlab("Yıl") +
+    ylab("Fiyat") +
+    theme_minimal()
+```
+
+## Grafiğin Yorumlanması
+
+* **Mavi Çizgi:** Modelimizin gelecek 24 ay için yaptığı noktasal tahminleri (en olası değerleri) gösterir.
+
+* **Mavi Gölgeli Alanlar:** Tahminin belirsizliğini ifade eden güven aralıklarıdır. Açık mavi alan **%95 güven aralığını**, koyu mavi alan ise **%80 güven aralığını** temsil eder. Örneğin, %95 güven aralığı, gelecekteki gerçek değerlerin %95 olasılıkla bu aralık içinde yer alacağını öngördüğümüz anlamına gelir. Tahmin ufku uzadıkça belirsizliğin artması (alanın genişlemesi) normaldir.
+
+Son olarak, tahmin edilen sayısal değerleri, alt ve üst güven sınırlarıyla birlikte bir tablo halinde görelim.
+
+```{r tahmin-tablosu}
+# Tahmin değerlerini bir tablo olarak görelim
+print(future_forecast)
+```
+
+# Sonuç ve Genel Değerlendirme
+
+Bu analizde, 1989 yılından itibaren olan aylık doğalgaz fiyatları verisiyle bir zaman serisi analizi gerçekleştirdik.
+
+1.  Verinin durağan olmadığını tespit ettik.
+
+2.  Varyansı stabilize etmek için **logaritmik dönüşüm**, trend ve mevsimselliği ortadan kaldırmak için ise **bir mevsimsel olmayan (d=1) ve bir mevsimsel (D=1)** fark alma işlemleri uygulayarak seriyi durağan hale getirdik.
+
+3.  Çeşitli SARIMA modellerini karşılaştırarak en düşük bilgi kriterine (AICc) sahip **SARIMA(0,1,1)(0,1,1)[12]** modelini en iyi model olarak belirledik.
+
+4.  Bu modelin artıklarının "White noise" olduğunu, yani modelin istatistiksel olarak geçerli ve güvenilir olduğunu teyit ettik.
+
+5.  Son olarak, bu geçerli model ile gelecek 24 ay için güven aralıklarını da içeren başarılı bir tahmin ürettik.
+
+
+
+
+
+
+
+
+
+
+
+
